@@ -30,7 +30,9 @@ jobs:
         run: npm ci
 
       - name: Build
-        run: npm run build
+        run: |
+          npm run build
+          touch dist/.nojekyll
 
       - name: Verify dist output
         run: |
