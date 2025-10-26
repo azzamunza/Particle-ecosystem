@@ -10,11 +10,11 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
     <title>Particle Ecosystem</title>
-    <!-- Tailwind CDN for the existing Tailwind classes used in the component -->
-    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Removed CDN tailwind usage (use PostCSS/Tailwind build instead) -->
   </head>
   <body class="h-screen">
     <div id="root" class="h-full"></div>
-    <script type="module" src="src/main.jsx"></script>
+    <!-- Use absolute path so Vite serves /src/main.jsx correctly in dev -->
+    <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>
