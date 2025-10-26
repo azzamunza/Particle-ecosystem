@@ -11,7 +11,7 @@ permissions:
   id-token: write
 
 jobs:
-  build-and-deploy:
+  build:
     runs-on: ubuntu-latest
     concurrency:
       group: 'pages-deploy'
@@ -32,13 +32,26 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Verify dist output
+        run: |
+          if [ ! -d dist ]; then
+            echo "ERROR: dist/ not found"
+            ls -la
+            exit 1
+          fi
+          echo "dist/ contains:"
+          ls -la dist | sed -n '1,200p'
+          echo "first lines of dist/index.html:"
+          sed -n '1,120p' dist/index.html || true
+
       - name: Upload artifact for GitHub Pages
+        # Use the pages-specific artifact uploader (not the generic upload-artifact v3)
         uses: actions/upload-pages-artifact@v1
         with:
           path: ./dist
 
   deploy:
-    needs: build-and-deploy
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       pages: write
