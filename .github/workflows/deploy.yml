@@ -1,64 +1,43 @@
-name: Build and deploy to GitHub Pages
+name: Deploy to GitHub Pages
 
 on:
   push:
-    branches:
-      - main
+    branches: ["main"]  # or "master" if that’s your default branch
 
 permissions:
   contents: read
   pages: write
   id-token: write
 
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    concurrency:
-      group: 'pages-deploy'
-      cancel-in-progress: true
-
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Use Node.js 18
-        uses: actions/setup-node@v4
-        with:
-          node-version: 18
 
       - name: Install dependencies
         run: npm install
 
       - name: Build
-        run: |
-          npm run build
-          touch dist/.nojekyll
+        run: npm run build
 
-      - name: Verify dist output
-        run: |
-          if [ ! -d dist ]; then
-            echo "ERROR: dist/ not found"
-            ls -la
-            exit 1
-          fi
-          echo "dist/ contains:"
-          ls -la dist | sed -n '1,200p'
-          echo "first lines of dist/index.html:"
-          sed -n '1,120p' dist/index.html || true
-
-      - name: Upload artifact for GitHub Pages
-        uses: actions/upload-pages-artifact@v4
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
         with:
-          path: ./dist
+          path: ./dist  # or your build output directory
 
   deploy:
-    needs: build
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
-    permissions:
-      pages: write
-      id-token: write
-      contents: read
-
+    needs: build
     steps:
       - name: Deploy to GitHub Pages
+        id: deployment
         uses: actions/deploy-pages@v4
