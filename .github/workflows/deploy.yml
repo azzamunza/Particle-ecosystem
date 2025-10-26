@@ -1,8 +1,9 @@
-name: Deploy to GitHub Pages
+name: Build and deploy to GitHub Pages
 
 on:
   push:
-    branches: ["main"]  # or "master" if that’s your default branch
+    branches:
+      - main
 
 permissions:
   contents: read
@@ -10,34 +11,58 @@ permissions:
   id-token: write
 
 concurrency:
-  group: "pages"
+  group: 'pages-deploy'
   cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Use Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
 
       - name: Install dependencies
         run: npm install
 
       - name: Build
-        run: npm run build
+        run: |
+          npm run build
+          # ensure Pages doesn't run Jekyll and that raw files are not served
+          if [ -d dist ]; then
+            touch dist/.nojekyll
+          fi
 
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+      - name: Verify dist output
+        run: |
+          if [ ! -d dist ]; then
+            echo "ERROR: dist/ not found"
+            ls -la
+            exit 1
+          fi
+          echo "dist/ contains:"
+          ls -la dist | sed -n '1,200p'
+          echo "first lines of dist/index.html:"
+          sed -n '1,120p' dist/index.html || true
+
+      - name: Upload artifact for GitHub Pages
+        uses: actions/upload-pages-artifact@v4
         with:
-          path: ./dist  # or your build output directory
+          path: ./dist
 
   deploy:
+    needs: build
+    runs-on: ubuntu-latest
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
-    needs: build
+    permissions:
+      pages: write
+      id-token: write
+      contents: read
     steps:
       - name: Deploy to GitHub Pages
-        id: deployment
         uses: actions/deploy-pages@v4
