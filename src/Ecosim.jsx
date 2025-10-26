@@ -1,62 +1,91 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Play, Pause, RotateCcw, ZoomIn, ZoomOut, Move } from 'lucide-react';
+import { Play, Pause, RotateCcw, ZoomIn, ZoomOut, Move, ChevronDown, ChevronUp } from 'lucide-react';
 
 /**
- * Ecosystem simulator with:
- * - responsive canvas sized to the browser viewport (minus settings panel)
- * - high-DPI handling (devicePixelRatio)
- * - zoom & pan (mouse wheel to zoom centered at cursor, click+drag to pan)
- * - settings panel on the right (sliders moved into a neat panel)
- * - stats fixed to reflect simulation state
- *
- * Notes:
- * - Internal simulation coordinates use CSS pixels (not device pixels).
- * - Canvas backing store is scaled by devicePixelRatio for crisp rendering.
- * - Transform to account for zoom/pan/DPR is applied via ctx.setTransform.
+ * Enhanced Ecosystem Simulator with:
+ * - 80/20 split: canvas (80% width) and settings panel (20% width)
+ * - Smooth organism membranes containing visible building blocks
+ * - Expanded building block types with compatibility system
+ * - Professional settings GUI with collapsible sections
+ * - Enhanced zoom & pan controls with sensitivity adjustment
+ * - Stats display at bottom of settings panel
  */
 
 const EcosystemSimulator = () => {
-  const containerRef = useRef(null); // container that holds canvas (left column)
+  const containerRef = useRef(null);
   const canvasRef = useRef(null);
   const animationRef = useRef(null);
 
-  // Simulation data in CSS pixels and logical coordinates
   const entitiesRef = useRef([]);
   const buildingBlocksRef = useRef([]);
   const gasGridRef = useRef(null);
 
-  // UI state
   const [isRunning, setIsRunning] = useState(true);
   const [stats, setStats] = useState({});
   const [params, setParams] = useState({
     initialBlocks: 800,
     speed: 0.4,
-    attractionRange: 12
+    attractionRange: 12,
+    zoomSensitivity: 1.0,
+    panSensitivity: 1.0
+  });
+  
+  const [collapsedSections, setCollapsedSections] = useState({
+    simulation: false,
+    view: false,
+    stats: false,
+    species: false
   });
 
-  // viewport transform refs (avoid excessive re-renders)
   const dprRef = useRef(window.devicePixelRatio || 1);
-  const scaleRef = useRef(1); // zoom scale (1 = 100%)
-  const offsetRef = useRef({ x: 0, y: 0 }); // pan offset in CSS pixels (translation of world)
+  const scaleRef = useRef(1);
+  const offsetRef = useRef({ x: 0, y: 0 });
   const isPanningRef = useRef(false);
   const panStartRef = useRef({ x: 0, y: 0, offsetX: 0, offsetY: 0 });
 
-  // constants
-  const PANEL_WIDTH = 340;
   const GRID_CELL_SIZE = 40;
 
-  // Building block types and recipes unchanged
+  // Expanded building block types with functional abilities
   const BLOCKS = {
-    NUTRIENT: { color: '#84cc16', mass: 1 },
-    CARBON: { color: '#78716c', mass: 1 },
-    PROTEIN: { color: '#ec4899', mass: 1 }
+    NUTRIENT: { color: '#84cc16', mass: 1, category: 'energy' },
+    CARBON: { color: '#78716c', mass: 1, category: 'structure' },
+    PROTEIN: { color: '#ec4899', mass: 1, category: 'structure' },
+    MEAT_EATER: { color: '#ef4444', mass: 1, category: 'diet' },
+    VEGETATION_EATER: { color: '#22c55e', mass: 1, category: 'diet' },
+    MOVEMENT: { color: '#3b82f6', mass: 1, category: 'locomotion' },
+    SENSOR: { color: '#a855f7', mass: 1, category: 'perception' },
+    VISION: { color: '#f59e0b', mass: 1, category: 'perception' },
+    AIR_BREATHER: { color: '#06b6d4', mass: 1, category: 'respiration' },
+    WATER_BREATHER: { color: '#0ea5e9', mass: 1, category: 'respiration' },
+    OXYGEN_PRODUCER: { color: '#10b981', mass: 1, category: 'gas_exchange' },
+    CO2_PRODUCER: { color: '#64748b', mass: 1, category: 'gas_exchange' }
   };
 
+  // Building block compatibility chart - defines which blocks can combine
+  const BLOCK_COMPATIBILITY = {
+    // Respiration types are mutually exclusive
+    AIR_BREATHER: ['NUTRIENT', 'CARBON', 'PROTEIN', 'MEAT_EATER', 'VEGETATION_EATER', 'MOVEMENT', 'SENSOR', 'VISION', 'OXYGEN_PRODUCER', 'CO2_PRODUCER'],
+    WATER_BREATHER: ['NUTRIENT', 'CARBON', 'PROTEIN', 'MEAT_EATER', 'VEGETATION_EATER', 'MOVEMENT', 'SENSOR', 'VISION', 'OXYGEN_PRODUCER', 'CO2_PRODUCER'],
+    // Diet types can coexist
+    MEAT_EATER: ['NUTRIENT', 'CARBON', 'PROTEIN', 'VEGETATION_EATER', 'MOVEMENT', 'SENSOR', 'VISION', 'AIR_BREATHER', 'WATER_BREATHER', 'OXYGEN_PRODUCER', 'CO2_PRODUCER'],
+    VEGETATION_EATER: ['NUTRIENT', 'CARBON', 'PROTEIN', 'MEAT_EATER', 'MOVEMENT', 'SENSOR', 'VISION', 'AIR_BREATHER', 'WATER_BREATHER', 'OXYGEN_PRODUCER', 'CO2_PRODUCER'],
+    // Basic blocks compatible with all
+    NUTRIENT: Object.keys(BLOCKS).filter(k => k !== 'NUTRIENT'),
+    CARBON: Object.keys(BLOCKS).filter(k => k !== 'CARBON'),
+    PROTEIN: Object.keys(BLOCKS).filter(k => k !== 'PROTEIN'),
+    MOVEMENT: Object.keys(BLOCKS).filter(k => k !== 'MOVEMENT'),
+    SENSOR: Object.keys(BLOCKS).filter(k => k !== 'SENSOR'),
+    VISION: Object.keys(BLOCKS).filter(k => k !== 'VISION'),
+    OXYGEN_PRODUCER: Object.keys(BLOCKS).filter(k => k !== 'OXYGEN_PRODUCER'),
+    CO2_PRODUCER: Object.keys(BLOCKS).filter(k => k !== 'CO2_PRODUCER')
+  };
+
+  // Updated entity recipes with new building blocks
   const ENTITY_RECIPES = {
     SLIME_MOLD: {
       name: 'Slime Mold',
       color: '#fbbf24',
-      requires: { NUTRIENT: 4, CARBON: 2 },
+      requires: { NUTRIENT: 3, CARBON: 2, VEGETATION_EATER: 1 },
       size: 3,
       speed: 0.15,
       metabolism: 0.02,
@@ -65,13 +94,13 @@ const EcosystemSimulator = () => {
       consumes: 'CO2',
       preyOn: [],
       canHibernate: true,
-      growthPattern: 'fractal',
-      cellShape: 'irregular'
+      membraneShape: 'capsule',
+      smoothness: 0.9
     },
     ALGAE: {
       name: 'Algae',
       color: '#22c55e',
-      requires: { NUTRIENT: 3, CARBON: 2 },
+      requires: { NUTRIENT: 2, CARBON: 2, OXYGEN_PRODUCER: 1, WATER_BREATHER: 1 },
       size: 2,
       speed: 0.05,
       metabolism: 0.015,
@@ -80,13 +109,13 @@ const EcosystemSimulator = () => {
       consumes: 'CO2',
       preyOn: [],
       canHibernate: true,
-      growthPattern: 'cluster',
-      cellShape: 'hexagon'
+      membraneShape: 'hexagon',
+      smoothness: 0.8
     },
     BACTERIA: {
       name: 'Bacteria',
       color: '#ec4899',
-      requires: { NUTRIENT: 3, PROTEIN: 2 },
+      requires: { NUTRIENT: 2, PROTEIN: 1, MEAT_EATER: 1, MOVEMENT: 1 },
       size: 2,
       speed: 0.3,
       metabolism: 0.04,
@@ -95,12 +124,13 @@ const EcosystemSimulator = () => {
       consumes: 'OXYGEN',
       preyOn: ['SLIME_MOLD'],
       canHibernate: true,
-      cellShape: 'rod'
+      membraneShape: 'rod',
+      smoothness: 1.0
     },
     PROTOZOA: {
       name: 'Protozoa',
       color: '#8b5cf6',
-      requires: { NUTRIENT: 4, PROTEIN: 3, CARBON: 1 },
+      requires: { NUTRIENT: 3, PROTEIN: 2, CARBON: 1, SENSOR: 1, MOVEMENT: 1 },
       size: 3,
       speed: 0.25,
       metabolism: 0.05,
@@ -109,12 +139,13 @@ const EcosystemSimulator = () => {
       consumes: 'OXYGEN',
       preyOn: ['BACTERIA', 'ALGAE'],
       canHibernate: true,
-      cellShape: 'oval'
+      membraneShape: 'oval',
+      smoothness: 0.95
     },
     PREDATOR: {
       name: 'Predator',
       color: '#ef4444',
-      requires: { PROTEIN: 5, CARBON: 3 },
+      requires: { PROTEIN: 3, CARBON: 2, MEAT_EATER: 2, VISION: 1, MOVEMENT: 1 },
       size: 4,
       speed: 0.4,
       metabolism: 0.08,
@@ -123,21 +154,14 @@ const EcosystemSimulator = () => {
       consumes: 'OXYGEN',
       preyOn: ['PROTOZOA', 'BACTERIA'],
       canHibernate: true,
-      cellShape: 'triangle'
+      membraneShape: 'triangle',
+      smoothness: 0.85
     }
   };
 
-  // Helpers to get CSS pixel canvas width/height (the logical world size)
-  const getCSSWidth = () => {
-    const canvas = canvasRef.current;
-    return canvas ? canvas.clientWidth : 0;
-  };
-  const getCSSHeight = () => {
-    const canvas = canvasRef.current;
-    return canvas ? canvas.clientHeight : 0;
-  };
+  const getCSSWidth = () => canvasRef.current?.clientWidth || 0;
+  const getCSSHeight = () => canvasRef.current?.clientHeight || 0;
 
-  // Initialize gas grid sized by CSS pixels
   const initGasGrid = (width, height) => {
     const cols = Math.ceil(width / GRID_CELL_SIZE);
     const rows = Math.ceil(height / GRID_CELL_SIZE);
@@ -151,7 +175,6 @@ const EcosystemSimulator = () => {
     return grid;
   };
 
-  // Map screen (client) coords to world (CSS pixel) coords considering pan & zoom
   const screenToWorld = (screenX, screenY) => {
     const rect = canvasRef.current.getBoundingClientRect();
     const px = screenX - rect.left;
@@ -164,7 +187,6 @@ const EcosystemSimulator = () => {
     };
   };
 
-  // Clamp offset so the world stays within bounds (when zoomed)
   const clampOffset = () => {
     const cssW = getCSSWidth();
     const cssH = getCSSHeight();
@@ -177,7 +199,20 @@ const EcosystemSimulator = () => {
     offsetRef.current.y = Math.min(Math.max(offsetRef.current.y, minY), maxY);
   };
 
-  // Initialize simulation using CSS pixel sizes
+  // Check if building blocks are compatible
+  const areBlocksCompatible = (blockTypes) => {
+    for (let i = 0; i < blockTypes.length; i++) {
+      for (let j = i + 1; j < blockTypes.length; j++) {
+        const type1 = blockTypes[i];
+        const type2 = blockTypes[j];
+        if (!BLOCK_COMPATIBILITY[type1]?.includes(type2)) {
+          return false;
+        }
+      }
+    }
+    return true;
+  };
+
   const initSimulation = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -185,15 +220,12 @@ const EcosystemSimulator = () => {
     const cssHeight = canvas.clientHeight;
 
     dprRef.current = window.devicePixelRatio || 1;
-
-    // Initialize gas grid sized in CSS pixels
     gasGridRef.current = initGasGrid(cssWidth, cssHeight);
 
-    // Initialize building blocks scattered randomly in CSS coords
     const blocks = [];
+    const blockTypes = Object.keys(BLOCKS);
     for (let i = 0; i < params.initialBlocks; i++) {
-      const types = Object.keys(BLOCKS);
-      const type = types[Math.floor(Math.random() * types.length)];
+      const type = blockTypes[Math.floor(Math.random() * blockTypes.length)];
       blocks.push({
         x: Math.random() * cssWidth,
         y: Math.random() * cssHeight,
@@ -206,12 +238,10 @@ const EcosystemSimulator = () => {
     }
     buildingBlocksRef.current = blocks;
     entitiesRef.current = [];
-    // Reset viewport (centered)
     scaleRef.current = 1;
     offsetRef.current = { x: 0, y: 0 };
   };
 
-  // Try forming entities — unchanged, but uses CSS pixel canvas dims in caller
   const tryFormEntity = (blocks, canvas) => {
     for (let [entityType, recipe] of Object.entries(ENTITY_RECIPES)) {
       if (Math.random() > 0.0005) continue;
@@ -239,11 +269,19 @@ const EcosystemSimulator = () => {
       }
 
       let canForm = true;
+      const requiredTypes = Object.keys(recipe.requires);
+      
+      // Check if we have enough of each type
       for (let [blockType, amount] of Object.entries(recipe.requires)) {
         if ((available[blockType] || 0) < amount) {
           canForm = false;
           break;
         }
+      }
+
+      // Check compatibility
+      if (canForm && !areBlocksCompatible(requiredTypes)) {
+        canForm = false;
       }
 
       if (canForm) {
@@ -295,7 +333,6 @@ const EcosystemSimulator = () => {
     return Math.sqrt(dx * dx + dy * dy);
   };
 
-  // Update simulation — uses CSS pixel coords for logic
   const update = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -361,7 +398,6 @@ const EcosystemSimulator = () => {
       block.x += block.vx * params.speed;
       block.y += block.vy * params.speed;
 
-      // Wrap using CSS dims
       if (block.x < 0) block.x = cssW;
       if (block.x > cssW) block.x = 0;
       if (block.y < 0) block.y = cssH;
@@ -369,21 +405,18 @@ const EcosystemSimulator = () => {
       block.age++;
     }
 
-    // Try form entity
     const newEntity = tryFormEntity(blocks, canvas);
     if (newEntity) entities.push(newEntity);
 
-    // Update entities (most logic unchanged but uses css dims)
+    // Update entities
     for (let i = entities.length - 1; i >= 0; i--) {
       const entity = entities[i];
       const recipe = ENTITY_RECIPES[entity.type];
-      const cell = (y => {
-        // getGridCell
-        const col = Math.floor(entity.x / GRID_CELL_SIZE);
-        const row = Math.floor(entity.y / GRID_CELL_SIZE);
-        if (row >= 0 && row < gasGrid.length && col >= 0 && col < gasGrid[0].length) return gasGrid[row][col];
-        return null;
-      })();
+      const col = Math.floor(entity.x / GRID_CELL_SIZE);
+      const row = Math.floor(entity.y / GRID_CELL_SIZE);
+      const cell = (row >= 0 && row < gasGrid.length && col >= 0 && col < gasGrid[0].length) 
+        ? gasGrid[row][col] 
+        : null;
 
       if (!cell) continue;
 
@@ -423,8 +456,6 @@ const EcosystemSimulator = () => {
           }
         } else {
           const desiredGas = recipe.consumes === 'OXYGEN' ? 'oxygen' : 'co2';
-          const cellCol = Math.floor(entity.x / GRID_CELL_SIZE);
-          const cellRow = Math.floor(entity.y / GRID_CELL_SIZE);
           let bestDir = null;
           let bestValue = cell[desiredGas];
 
@@ -472,7 +503,7 @@ const EcosystemSimulator = () => {
         if (entity.y > cssH) entity.y = 0;
       }
 
-      // Gas exchange and energy changes
+      // Gas exchange
       if (canBreathe) {
         if (recipe.consumes === 'OXYGEN') cell.oxygen -= activeMetabolism * 2;
         else cell.co2 -= activeMetabolism * 2;
@@ -494,7 +525,6 @@ const EcosystemSimulator = () => {
               entity.energy = Math.min(100, entity.energy + 30);
               entity.timeSinceFed = 0;
               ate = true;
-              // drop prey blocks
               for (let [blockType, amount] of Object.entries(prey.cellBlocks)) {
                 for (let k = 0; k < amount; k++) {
                   blocks.push({
@@ -561,7 +591,7 @@ const EcosystemSimulator = () => {
       }
     }
 
-    // Update stats (ensure numeric where expected)
+    // Update stats
     const typeCounts = {};
     const typeStats = {};
     let hibernating = 0;
@@ -610,7 +640,112 @@ const EcosystemSimulator = () => {
     });
   };
 
-  // Render using transform: scale & pan applied, and DPR handled in transform
+  // Draw smooth membrane shapes
+  const drawSmoothMembrane = (ctx, entity, recipe) => {
+    const smoothness = recipe.smoothness || 0.8;
+    const angle = Math.atan2(entity.vy, entity.vx);
+    
+    ctx.save();
+    ctx.translate(entity.x, entity.y);
+    
+    const hex = recipe.color.replace('#', '');
+    const r = parseInt(hex.substring(0, 2), 16);
+    const g = parseInt(hex.substring(2, 4), 16);
+    const b = parseInt(hex.substring(4, 6), 16);
+    const opacity = entity.hibernating ? 0.4 : Math.max(0.6, entity.energy / 100);
+    
+    ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${opacity})`;
+    ctx.lineWidth = 2.5;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    
+    switch (recipe.membraneShape) {
+      case 'capsule':
+        ctx.rotate(angle);
+        ctx.beginPath();
+        const capsuleLength = recipe.size * 1.8;
+        const capsuleRadius = recipe.size * 0.7;
+        ctx.arc(-capsuleLength/2, 0, capsuleRadius, Math.PI/2, Math.PI * 3/2);
+        ctx.lineTo(capsuleLength/2, -capsuleRadius);
+        ctx.arc(capsuleLength/2, 0, capsuleRadius, -Math.PI/2, Math.PI/2);
+        ctx.lineTo(-capsuleLength/2, capsuleRadius);
+        ctx.closePath();
+        ctx.stroke();
+        break;
+        
+      case 'hexagon':
+        ctx.beginPath();
+        for (let i = 0; i < 6; i++) {
+          const a = (Math.PI / 3) * i;
+          const nextA = (Math.PI / 3) * (i + 1);
+          const x1 = Math.cos(a) * recipe.size;
+          const y1 = Math.sin(a) * recipe.size;
+          const x2 = Math.cos(nextA) * recipe.size;
+          const y2 = Math.sin(nextA) * recipe.size;
+          
+          if (i === 0) ctx.moveTo(x1, y1);
+          
+          const cpx = (x1 + x2) / 2 * (1 + smoothness * 0.1);
+          const cpy = (y1 + y2) / 2 * (1 + smoothness * 0.1);
+          ctx.quadraticCurveTo(cpx, cpy, x2, y2);
+        }
+        ctx.closePath();
+        ctx.stroke();
+        break;
+        
+      case 'rod':
+        ctx.rotate(angle);
+        ctx.beginPath();
+        ctx.ellipse(0, 0, recipe.size * 1.5, recipe.size * 0.6, 0, 0, Math.PI * 2);
+        ctx.stroke();
+        break;
+        
+      case 'oval':
+        ctx.beginPath();
+        ctx.ellipse(0, 0, recipe.size * 1.2, recipe.size * 0.8, 0, 0, Math.PI * 2);
+        ctx.stroke();
+        break;
+        
+      case 'triangle':
+        ctx.rotate(angle);
+        ctx.beginPath();
+        const points = [
+          { x: recipe.size * 1.5, y: 0 },
+          { x: -recipe.size * 0.7, y: recipe.size * 0.9 },
+          { x: -recipe.size * 0.7, y: -recipe.size * 0.9 }
+        ];
+        
+        ctx.moveTo(points[0].x, points[0].y);
+        for (let i = 0; i < points.length; i++) {
+          const curr = points[i];
+          const next = points[(i + 1) % points.length];
+          const cp1x = curr.x * (1 - smoothness * 0.3);
+          const cp1y = curr.y * (1 - smoothness * 0.3);
+          const cp2x = next.x * (1 - smoothness * 0.3);
+          const cp2y = next.y * (1 - smoothness * 0.3);
+          ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, next.x, next.y);
+        }
+        ctx.closePath();
+        ctx.stroke();
+        break;
+        
+      default:
+        ctx.beginPath();
+        ctx.arc(0, 0, recipe.size, 0, Math.PI * 2);
+        ctx.stroke();
+    }
+    
+    if (entity.hibernating) {
+      ctx.strokeStyle = '#60a5fa';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(0, 0, recipe.size + 4, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    
+    ctx.restore();
+  };
+
   const render = () => {
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext('2d');
@@ -622,15 +757,11 @@ const EcosystemSimulator = () => {
     const scale = scaleRef.current;
     const offset = offsetRef.current;
 
-    // Clear full backing store first
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // Apply combined transform: DPR and user zoom/pan
-    // We want that one unit in our simulation = 1 CSS pixel on the canvas
     ctx.setTransform(dpr * scale, 0, 0, dpr * scale, offset.x * dpr, offset.y * dpr);
 
-    // Draw background in world coordinates
     ctx.fillStyle = '#0a0a0a';
     ctx.fillRect(0, 0, cssW, cssH);
 
@@ -649,24 +780,28 @@ const EcosystemSimulator = () => {
       }
     }
 
-    // Draw building blocks
+    // Draw free building blocks
     const blocks = buildingBlocksRef.current;
     for (let block of blocks) {
       if (!block.free) continue;
       const blockInfo = BLOCKS[block.type];
       ctx.beginPath();
-      ctx.arc(block.x, block.y, 3, 0, Math.PI * 2);
+      ctx.arc(block.x, block.y, 2.5, 0, Math.PI * 2);
       ctx.fillStyle = blockInfo.color;
       ctx.fill();
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+      ctx.lineWidth = 0.5;
+      ctx.stroke();
     }
 
-    // Draw entities
     const entities = entitiesRef.current;
+    
+    // Draw building blocks inside organisms
     for (let entity of entities) {
       const recipe = ENTITY_RECIPES[entity.type];
-      // draw cell blocks
       let blockIdx = 0;
       const totalBlocks = Object.values(entity.cellBlocks).reduce((a, b) => a + b, 0);
+      
       for (let [blockType, amount] of Object.entries(entity.cellBlocks)) {
         const blockInfo = BLOCKS[blockType];
         for (let i = 0; i < amount; i++) {
@@ -674,138 +809,32 @@ const EcosystemSimulator = () => {
           const radius = recipe.size * 0.5;
           const bx = entity.x + Math.cos(angle) * radius;
           const by = entity.y + Math.sin(angle) * radius;
+          
           ctx.beginPath();
           ctx.arc(bx, by, 2, 0, Math.PI * 2);
           ctx.fillStyle = blockInfo.color;
           ctx.fill();
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+          ctx.lineWidth = 0.5;
+          ctx.stroke();
           blockIdx++;
         }
       }
     }
 
-    // Draw membranes and other decorations
+    // Draw smooth membranes
     for (let entity of entities) {
       const recipe = ENTITY_RECIPES[entity.type];
-      const opacity = entity.hibernating ? 0.4 : Math.max(0.6, entity.energy / 100);
-      ctx.save();
-      ctx.translate(entity.x, entity.y);
-      const angle = Math.atan2(entity.vy, entity.vx);
-      // strokeStyle with alpha: generate rgba from hex + alpha
-      const hex = recipe.color.replace('#', '');
-      const r = parseInt(hex.substring(0, 2), 16);
-      const g = parseInt(hex.substring(2, 4), 16);
-      const b = parseInt(hex.substring(4, 6), 16);
-      ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${opacity})`;
-      ctx.lineWidth = 2;
-      ctx.fillStyle = 'transparent';
-
-      switch (recipe.cellShape) {
-        case 'hexagon': {
-          ctx.beginPath();
-          for (let i = 0; i < 6; i++) {
-            const a = (Math.PI / 3) * i;
-            const x = Math.cos(a) * recipe.size;
-            const y = Math.sin(a) * recipe.size;
-            if (i === 0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
-          }
-          ctx.closePath();
-          ctx.stroke();
-          break;
-        }
-        case 'rod':
-          ctx.rotate(angle);
-          ctx.beginPath();
-          ctx.ellipse(0, 0, recipe.size * 1.5, recipe.size * 0.6, 0, 0, Math.PI * 2);
-          ctx.stroke();
-          break;
-        case 'oval':
-          ctx.beginPath();
-          ctx.ellipse(0, 0, recipe.size * 1.2, recipe.size * 0.8, 0, 0, Math.PI * 2);
-          ctx.stroke();
-          break;
-        case 'triangle':
-          ctx.rotate(angle);
-          ctx.beginPath();
-          ctx.moveTo(recipe.size * 1.5, 0);
-          ctx.lineTo(-recipe.size * 0.7, recipe.size * 0.9);
-          ctx.lineTo(-recipe.size * 0.7, -recipe.size * 0.9);
-          ctx.closePath();
-          ctx.stroke();
-          break;
-        case 'irregular':
-          ctx.beginPath();
-          for (let i = 0; i < 8; i++) {
-            const a = (Math.PI * 2 / 8) * i;
-            const variation = 0.7 + Math.sin(entity.age * 0.1 + i) * 0.3;
-            const x = Math.cos(a) * recipe.size * variation;
-            const y = Math.sin(a) * recipe.size * variation;
-            if (i === 0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
-          }
-          ctx.closePath();
-          ctx.stroke();
-          break;
-        default:
-          ctx.beginPath();
-          ctx.arc(0, 0, recipe.size, 0, Math.PI * 2);
-          ctx.stroke();
-      }
-
-      if (entity.hibernating) {
-        ctx.strokeStyle = '#60a5fa';
-        ctx.lineWidth = 2.5;
-        ctx.beginPath();
-        ctx.arc(0, 0, recipe.size + 3, 0, Math.PI * 2);
-        ctx.stroke();
-      }
-
-      ctx.restore();
-
-      if (entity.type === 'SLIME_MOLD' && !entity.hibernating && entity.energy > 50) {
-        for (let i = 0; i < 4; i++) {
-          const a = (Math.PI * 2 / 4) * i + entity.age * 0.02;
-          const len = 6 + Math.sin(entity.age * 0.05 + i) * 3;
-          ctx.beginPath();
-          ctx.moveTo(entity.x, entity.y);
-          ctx.lineTo(entity.x + Math.cos(a) * len, entity.y + Math.sin(a) * len);
-          ctx.strokeStyle = recipe.color + '80';
-          ctx.lineWidth = 2;
-          ctx.stroke();
-        }
-      }
+      drawSmoothMembrane(ctx, entity, recipe);
     }
-
-    // Draw HUD / stats in screen space: reset transform and overlay host-space text
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    // Scale font by DPR so text remains crisp
-    ctx.fillStyle = 'white';
-    ctx.font = `${16 * dpr}px monospace`;
-    let y = 24 * dpr;
-    ctx.fillText('ECOSYSTEM STATS', 12 * dpr, y);
-    y += 22 * dpr;
-    ctx.fillStyle = '#a3a3a3';
-    ctx.fillText(`Total Organisms: ${stats.totalOrganisms || 0}`, 12 * dpr, y);
-    y += 18 * dpr;
-    ctx.fillText(`Avg Energy: ${stats.avgEnergy || 0}`, 12 * dpr, y);
-    y += 18 * dpr;
-    ctx.fillText(`Avg Age: ${stats.avgAge || 0}`, 12 * dpr, y);
-    y += 18 * dpr;
-    ctx.fillStyle = '#60a5fa';
-    ctx.fillText(`Hibernating: ${stats.hibernating || 0}`, 12 * dpr, y);
-    y += 18 * dpr;
-    ctx.fillStyle = '#84cc16';
-    ctx.fillText(`Free Blocks: ${stats.blocks || 0}`, 12 * dpr, y);
   };
 
-  // Main animation loop
   const animate = () => {
     if (isRunning) update();
     render();
     animationRef.current = requestAnimationFrame(animate);
   };
 
-  // Resize canvas backing store based on container size and DPR
   const resizeCanvasBacking = () => {
     const canvas = canvasRef.current;
     const container = containerRef.current;
@@ -814,17 +843,13 @@ const EcosystemSimulator = () => {
     dprRef.current = dpr;
     const cssWidth = Math.max(100, container.clientWidth);
     const cssHeight = Math.max(100, container.clientHeight);
-    // Set CSS size explicitly (so clientWidth/clientHeight are stable)
     canvas.style.width = `${cssWidth}px`;
     canvas.style.height = `${cssHeight}px`;
-    // Backing store
     canvas.width = Math.floor(cssWidth * dpr);
     canvas.height = Math.floor(cssHeight * dpr);
-    // ensure offset doesn't go out of bounds after resize
     clampOffset();
   };
 
-  // Wheel -> zoom centered on cursor
   const onWheel = (e) => {
     e.preventDefault();
     const canvas = canvasRef.current;
@@ -832,10 +857,9 @@ const EcosystemSimulator = () => {
     const rect = canvas.getBoundingClientRect();
     const px = e.clientX - rect.left;
     const py = e.clientY - rect.top;
-    const zoomFactor = e.deltaY < 0 ? 1.12 : 0.88;
+    const zoomFactor = (e.deltaY < 0 ? 1.12 : 0.88) * params.zoomSensitivity;
     const oldScale = scaleRef.current;
     let newScale = Math.min(4, Math.max(0.2, oldScale * zoomFactor));
-    // zoom toward the cursor
     const worldX = (px - offsetRef.current.x) / oldScale;
     const worldY = (py - offsetRef.current.y) / oldScale;
     offsetRef.current.x = px - worldX * newScale;
@@ -844,7 +868,6 @@ const EcosystemSimulator = () => {
     clampOffset();
   };
 
-  // Mouse events for panning
   const onMouseDown = (e) => {
     if (e.button !== 0) return;
     isPanningRef.current = true;
@@ -857,214 +880,321 @@ const EcosystemSimulator = () => {
     window.addEventListener('mousemove', onMouseMove);
     window.addEventListener('mouseup', onMouseUp);
   };
+  
   const onMouseMove = (e) => {
     if (!isPanningRef.current) return;
-    const dx = e.clientX - panStartRef.current.x;
-    const dy = e.clientY - panStartRef.current.y;
+    const dx = (e.clientX - panStartRef.current.x) * params.panSensitivity;
+    const dy = (e.clientY - panStartRef.current.y) * params.panSensitivity;
     offsetRef.current.x = panStartRef.current.offsetX + dx;
     offsetRef.current.y = panStartRef.current.offsetY + dy;
     clampOffset();
   };
+  
   const onMouseUp = () => {
     isPanningRef.current = false;
     window.removeEventListener('mousemove', onMouseMove);
     window.removeEventListener('mouseup', onMouseUp);
   };
 
-  // Reset view
   const resetView = () => {
     scaleRef.current = 1;
     offsetRef.current = { x: 0, y: 0 };
   };
 
-  // Effects: resize handling, init sim, and start animation
   useEffect(() => {
     const handleResize = () => {
       resizeCanvasBacking();
-      // Re-init gas grid size to match new CSS dims
       initSimulation();
     };
     window.addEventListener('resize', handleResize);
-    // Initial sizing
     resizeCanvasBacking();
     initSimulation();
     animate();
-    // Pointer events on the canvas
     const canvas = canvasRef.current;
     canvas?.addEventListener('wheel', onWheel, { passive: false });
     canvas?.addEventListener('mousedown', onMouseDown);
     return () => {
       window.removeEventListener('resize', handleResize);
       cancelAnimationFrame(animationRef.current);
-      canvas?.removeEventListener('wheel', onWheel, { passive: false });
+      canvas?.removeEventListener('wheel', onWheel);
       canvas?.removeEventListener('mousedown', onMouseDown);
       window.removeEventListener('mousemove', onMouseMove);
       window.removeEventListener('mouseup', onMouseUp);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Re-init simulation when initialBlocks changes
   useEffect(() => {
     initSimulation();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params.initialBlocks]);
 
-  // UI handlers
   const toggleRunning = () => setIsRunning(r => !r);
-  const onReset = () => {
-    initSimulation();
+  const onReset = () => initSimulation();
+  const toggleSection = (section) => {
+    setCollapsedSections(prev => ({ ...prev, [section]: !prev[section] }));
   };
 
   return (
     <div className="w-full h-screen bg-gray-900 flex flex-col">
-      <div className="bg-gray-800 p-3 border-b border-gray-700 flex items-center justify-between">
-        <h1 className="text-lg font-bold text-white">Cellular Life Formation Simulator</h1>
-        <div className="flex items-center gap-2">
-          <button onClick={toggleRunning} className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded flex items-center gap-2">
-            {isRunning ? <><Pause size={14} /> Pause</> : <><Play size={14} /> Play</>}
-          </button>
-          <button onClick={onReset} className="px-3 py-1 bg-gray-600 hover:bg-gray-700 text-white rounded flex items-center gap-2">
-            <RotateCcw size={14} /> Reset
-          </button>
-          <div className="text-gray-300 text-sm ml-3">Use mouse wheel to zoom, click+drag to pan</div>
+      {/* Header */}
+      <div className="bg-gradient-to-r from-gray-800 to-gray-900 p-4 border-b border-gray-700 shadow-lg">
+        <div className="flex items-center justify-between">
+          <h1 className="text-xl font-bold text-white tracking-tight">Cellular Life Formation Simulator</h1>
+          <div className="flex items-center gap-3">
+            <button 
+              onClick={toggleRunning} 
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg flex items-center gap-2 transition-all shadow-md hover:shadow-lg"
+            >
+              {isRunning ? <><Pause size={16} /> Pause</> : <><Play size={16} /> Play</>}
+            </button>
+            <button 
+              onClick={onReset} 
+              className="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg flex items-center gap-2 transition-all shadow-md hover:shadow-lg"
+            >
+              <RotateCcw size={16} /> Reset
+            </button>
+          </div>
         </div>
       </div>
 
       <div className="flex-1 flex overflow-hidden">
-        {/* Canvas container (left) */}
-        <div ref={containerRef} className="flex-1 flex items-center justify-center bg-black" style={{ minWidth: 0 }}>
+        {/* Canvas container - 80% width */}
+        <div ref={containerRef} className="flex-1 bg-black" style={{ width: '80%' }}>
           <canvas
             ref={canvasRef}
-            className="mx-auto"
-            style={{
-              // The canvas backing is sized programmatically, but ensure it doesn't overflow the container.
-              display: 'block',
-              maxWidth: '100%',
-              maxHeight: '100%'
-            }}
+            className="w-full h-full"
+            style={{ display: 'block' }}
           />
         </div>
 
-        {/* Settings panel (right) */}
-        <aside className="w-80 bg-gray-800 border-l border-gray-700 p-4 overflow-auto">
-          <h2 className="text-white font-semibold mb-3">Simulation Settings</h2>
-
-          <div className="mb-4">
-            <label className="text-gray-300 text-sm block mb-1">Building Blocks: {params.initialBlocks}</label>
-            <input
-              type="range"
-              min="100"
-              max="2000"
-              value={params.initialBlocks}
-              onChange={(e) => setParams({ ...params, initialBlocks: parseInt(e.target.value) })}
-              className="w-full"
-            />
-          </div>
-
-          <div className="mb-4">
-            <label className="text-gray-300 text-sm block mb-1">Attraction Range: {params.attractionRange}px</label>
-            <input
-              type="range"
-              min="5"
-              max="80"
-              step="1"
-              value={params.attractionRange}
-              onChange={(e) => setParams({ ...params, attractionRange: parseInt(e.target.value) })}
-              className="w-full"
-            />
-          </div>
-
-          <div className="mb-4">
-            <label className="text-gray-300 text-sm block mb-1">Speed: {params.speed.toFixed(2)}x</label>
-            <input
-              type="range"
-              min="0.05"
-              max="2.0"
-              step="0.01"
-              value={params.speed}
-              onChange={(e) => setParams({ ...params, speed: parseFloat(e.target.value) })}
-              className="w-full"
-            />
-          </div>
-
-          <div className="mb-4">
-            <h3 className="text-gray-200 font-medium mb-2">View</h3>
-            <div className="flex items-center gap-2 mb-2">
-              <button
-                title="Zoom in"
-                onClick={() => {
-                  const rect = canvasRef.current.getBoundingClientRect();
-                  const cx = rect.width / 2;
-                  const cy = rect.height / 2;
-                  const world = screenToWorld(rect.left + cx, rect.top + cy);
-                  scaleRef.current = Math.min(4, scaleRef.current * 1.2);
-                  offsetRef.current.x = cx - world.x * scaleRef.current;
-                  offsetRef.current.y = cy - world.y * scaleRef.current;
-                  clampOffset();
-                }}
-                className="px-2 py-1 bg-gray-700 text-white rounded flex items-center gap-2"
+        {/* Settings panel - 20% width */}
+        <aside className="bg-gradient-to-b from-gray-800 to-gray-900 border-l border-gray-700 overflow-y-auto" style={{ width: '20%', minWidth: '280px' }}>
+          <div className="p-5 space-y-4">
+            
+            {/* Simulation Settings Section */}
+            <div className="bg-gray-700/50 rounded-lg p-4 shadow-md border border-gray-600">
+              <button 
+                onClick={() => toggleSection('simulation')}
+                className="w-full flex items-center justify-between text-white font-semibold mb-3 hover:text-blue-400 transition-colors"
               >
-                <ZoomIn size={14} /> Zoom In
+                <span className="text-sm uppercase tracking-wide">Simulation</span>
+                {collapsedSections.simulation ? <ChevronDown size={18} /> : <ChevronUp size={18} />}
               </button>
-              <button
-                title="Zoom out"
-                onClick={() => {
-                  const rect = canvasRef.current.getBoundingClientRect();
-                  const cx = rect.width / 2;
-                  const cy = rect.height / 2;
-                  const world = screenToWorld(rect.left + cx, rect.top + cy);
-                  scaleRef.current = Math.max(0.2, scaleRef.current * 0.8);
-                  offsetRef.current.x = cx - world.x * scaleRef.current;
-                  offsetRef.current.y = cy - world.y * scaleRef.current;
-                  clampOffset();
-                }}
-                className="px-2 py-1 bg-gray-700 text-white rounded flex items-center gap-2"
-              >
-                <ZoomOut size={14} /> Zoom Out
-              </button>
-              <button
-                title="Reset view"
-                onClick={resetView}
-                className="px-2 py-1 bg-gray-700 text-white rounded flex items-center gap-2"
-              >
-                <Move size={14} /> Reset View
-              </button>
-            </div>
-          </div>
+              
+              {!collapsedSections.simulation && (
+                <div className="space-y-4">
+                  <div>
+                    <label className="text-gray-300 text-xs font-medium block mb-2">
+                      Building Blocks: <span className="text-white font-bold">{params.initialBlocks}</span>
+                    </label>
+                    <input
+                      type="range"
+                      min="100"
+                      max="2000"
+                      value={params.initialBlocks}
+                      onChange={(e) => setParams({ ...params, initialBlocks: parseInt(e.target.value) })}
+                      className="w-full h-2 bg-gray-600 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                    />
+                  </div>
 
-          <div className="mt-6">
-            <h3 className="text-gray-200 font-medium mb-2">Simulation Stats</h3>
-            <div className="text-gray-300 text-sm space-y-1">
-              <div>Total Organisms: <span className="text-white">{stats.totalOrganisms || 0}</span></div>
-              <div>Avg Energy: <span className="text-white">{stats.avgEnergy || 0}</span></div>
-              <div>Avg Age: <span className="text-white">{stats.avgAge || 0}</span></div>
-              <div>Hibernating: <span className="text-white">{stats.hibernating || 0}</span></div>
-              <div>Free Blocks: <span className="text-white">{stats.blocks || 0}</span></div>
+                  <div>
+                    <label className="text-gray-300 text-xs font-medium block mb-2">
+                      Attraction Range: <span className="text-white font-bold">{params.attractionRange}px</span>
+                    </label>
+                    <input
+                      type="range"
+                      min="5"
+                      max="80"
+                      step="1"
+                      value={params.attractionRange}
+                      onChange={(e) => setParams({ ...params, attractionRange: parseInt(e.target.value) })}
+                      className="w-full h-2 bg-gray-600 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-gray-300 text-xs font-medium block mb-2">
+                      Speed: <span className="text-white font-bold">{params.speed.toFixed(2)}x</span>
+                    </label>
+                    <input
+                      type="range"
+                      min="0.05"
+                      max="2.0"
+                      step="0.01"
+                      value={params.speed}
+                      onChange={(e) => setParams({ ...params, speed: parseFloat(e.target.value) })}
+                      className="w-full h-2 bg-gray-600 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                    />
+                  </div>
+                </div>
+              )}
             </div>
 
-            <div className="mt-4">
-              <h4 className="text-gray-200 font-medium mb-2">Species Details</h4>
-              <div className="text-gray-300 text-sm space-y-2 max-h-48 overflow-auto">
-                {Object.entries(stats.typeStats || {}).length === 0 && (
-                  <div className="text-gray-500">No species yet</div>
-                )}
-                {Object.entries(stats.typeStats || {}).map(([type, data]) => {
-                  const recipe = ENTITY_RECIPES[type];
-                  if (!recipe) return null;
-                  return (
-                    <div key={type} className="p-2 bg-gray-700 rounded">
-                      <div className="font-semibold" style={{ color: recipe.color }}>{recipe.name}</div>
-                      <div className="text-xs text-gray-300">Count: {stats[type] || 0}</div>
-                      <div className="text-xs text-gray-300">Energy: {data.avgEnergy}</div>
-                      <div className="text-xs text-gray-300">Age: {data.avgAge}</div>
-                      <div className="text-xs text-gray-300">Starve: {data.avgStarvation}</div>
-                      <div className="text-xs text-gray-300">Metab: {data.avgMetabolism}</div>
-                    </div>
-                  );
-                })}
-              </div>
+            {/* View Controls Section */}
+            <div className="bg-gray-700/50 rounded-lg p-4 shadow-md border border-gray-600">
+              <button 
+                onClick={() => toggleSection('view')}
+                className="w-full flex items-center justify-between text-white font-semibold mb-3 hover:text-blue-400 transition-colors"
+              >
+                <span className="text-sm uppercase tracking-wide">View Controls</span>
+                {collapsedSections.view ? <ChevronDown size={18} /> : <ChevronUp size={18} />}
+              </button>
+              
+              {!collapsedSections.view && (
+                <div className="space-y-4">
+                  <div className="grid grid-cols-3 gap-2">
+                    <button
+                      onClick={() => {
+                        const rect = canvasRef.current?.getBoundingClientRect();
+                        if (!rect) return;
+                        const cx = rect.width / 2;
+                        const cy = rect.height / 2;
+                        const world = screenToWorld(rect.left + cx, rect.top + cy);
+                        scaleRef.current = Math.min(4, scaleRef.current * 1.2);
+                        offsetRef.current.x = cx - world.x * scaleRef.current;
+                        offsetRef.current.y = cy - world.y * scaleRef.current;
+                        clampOffset();
+                      }}
+                      className="px-2 py-2 bg-gray-600 hover:bg-gray-500 text-white rounded-lg flex items-center justify-center gap-1 text-xs transition-all"
+                      title="Zoom In"
+                    >
+                      <ZoomIn size={14} />
+                    </button>
+                    <button
+                      onClick={() => {
+                        const rect = canvasRef.current?.getBoundingClientRect();
+                        if (!rect) return;
+                        const cx = rect.width / 2;
+                        const cy = rect.height / 2;
+                        const world = screenToWorld(rect.left + cx, rect.top + cy);
+                        scaleRef.current = Math.max(0.2, scaleRef.current * 0.8);
+                        offsetRef.current.x = cx - world.x * scaleRef.current;
+                        offsetRef.current.y = cy - world.y * scaleRef.current;
+                        clampOffset();
+                      }}
+                      className="px-2 py-2 bg-gray-600 hover:bg-gray-500 text-white rounded-lg flex items-center justify-center gap-1 text-xs transition-all"
+                      title="Zoom Out"
+                    >
+                      <ZoomOut size={14} />
+                    </button>
+                    <button
+                      onClick={resetView}
+                      className="px-2 py-2 bg-gray-600 hover:bg-gray-500 text-white rounded-lg flex items-center justify-center gap-1 text-xs transition-all"
+                      title="Reset View"
+                    >
+                      <Move size={14} />
+                    </button>
+                  </div>
+
+                  <div>
+                    <label className="text-gray-300 text-xs font-medium block mb-2">
+                      Zoom Sensitivity: <span className="text-white font-bold">{params.zoomSensitivity.toFixed(2)}</span>
+                    </label>
+                    <input
+                      type="range"
+                      min="0.5"
+                      max="2.0"
+                      step="0.1"
+                      value={params.zoomSensitivity}
+                      onChange={(e) => setParams({ ...params, zoomSensitivity: parseFloat(e.target.value) })}
+                      className="w-full h-2 bg-gray-600 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-gray-300 text-xs font-medium block mb-2">
+                      Pan Sensitivity: <span className="text-white font-bold">{params.panSensitivity.toFixed(2)}</span>
+                    </label>
+                    <input
+                      type="range"
+                      min="0.5"
+                      max="2.0"
+                      step="0.1"
+                      value={params.panSensitivity}
+                      onChange={(e) => setParams({ ...params, panSensitivity: parseFloat(e.target.value) })}
+                      className="w-full h-2 bg-gray-600 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                    />
+                  </div>
+
+                  <div className="text-gray-400 text-xs bg-gray-800/50 p-2 rounded">
+                    <p>🖱️ Scroll to zoom</p>
+                    <p>🖱️ Click & drag to pan</p>
+                  </div>
+                </div>
+              )}
             </div>
+
+            {/* Stats Section */}
+            <div className="bg-gray-700/50 rounded-lg p-4 shadow-md border border-gray-600">
+              <button 
+                onClick={() => toggleSection('stats')}
+                className="w-full flex items-center justify-between text-white font-semibold mb-3 hover:text-blue-400 transition-colors"
+              >
+                <span className="text-sm uppercase tracking-wide">Statistics</span>
+                {collapsedSections.stats ? <ChevronDown size={18} /> : <ChevronUp size={18} />}
+              </button>
+              
+              {!collapsedSections.stats && (
+                <div className="space-y-2 text-sm">
+                  <div className="flex justify-between items-center py-1 border-b border-gray-600">
+                    <span className="text-gray-300">Total Organisms:</span>
+                    <span className="text-white font-bold">{stats.totalOrganisms || 0}</span>
+                  </div>
+                  <div className="flex justify-between items-center py-1 border-b border-gray-600">
+                    <span className="text-gray-300">Avg Energy:</span>
+                    <span className="text-green-400 font-bold">{stats.avgEnergy || 0}</span>
+                  </div>
+                  <div className="flex justify-between items-center py-1 border-b border-gray-600">
+                    <span className="text-gray-300">Avg Age:</span>
+                    <span className="text-blue-400 font-bold">{stats.avgAge || 0}</span>
+                  </div>
+                  <div className="flex justify-between items-center py-1 border-b border-gray-600">
+                    <span className="text-gray-300">Hibernating:</span>
+                    <span className="text-cyan-400 font-bold">{stats.hibernating || 0}</span>
+                  </div>
+                  <div className="flex justify-between items-center py-1">
+                    <span className="text-gray-300">Free Blocks:</span>
+                    <span className="text-lime-400 font-bold">{stats.blocks || 0}</span>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Species Details Section */}
+            <div className="bg-gray-700/50 rounded-lg p-4 shadow-md border border-gray-600">
+              <button 
+                onClick={() => toggleSection('species')}
+                className="w-full flex items-center justify-between text-white font-semibold mb-3 hover:text-blue-400 transition-colors"
+              >
+                <span className="text-sm uppercase tracking-wide">Species Details</span>
+                {collapsedSections.species ? <ChevronDown size={18} /> : <ChevronUp size={18} />}
+              </button>
+              
+              {!collapsedSections.species && (
+                <div className="space-y-2 max-h-64 overflow-y-auto">
+                  {Object.entries(stats.typeStats || {}).length === 0 && (
+                    <div className="text-gray-500 text-sm text-center py-4">No species yet</div>
+                  )}
+                  {Object.entries(stats.typeStats || {}).map(([type, data]) => {
+                    const recipe = ENTITY_RECIPES[type];
+                    if (!recipe) return null;
+                    return (
+                      <div key={type} className="bg-gray-800/70 rounded-lg p-3 border border-gray-600">
+                        <div className="font-bold text-sm mb-2" style={{ color: recipe.color }}>
+                          {recipe.name}
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 text-xs">
+                          <div className="text-gray-400">Count: <span className="text-white">{stats[type] || 0}</span></div>
+                          <div className="text-gray-400">Energy: <span className="text-white">{data.avgEnergy}</span></div>
+                          <div className="text-gray-400">Age: <span className="text-white">{data.avgAge}</span></div>
+                          <div className="text-gray-400">Starve: <span className="text-white">{data.avgStarvation}</span></div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
           </div>
         </aside>
       </div>
