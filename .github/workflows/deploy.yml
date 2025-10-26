@@ -44,10 +44,10 @@ jobs:
           echo "first lines of dist/index.html:"
           sed -n '1,120p' dist/index.html || true
 
-      - name: Upload artifact for GitHub Pages
-        # Use the pages-specific artifact uploader (not the generic upload-artifact v3)
-        uses: actions/upload-pages-artifact@v1
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
+          name: github-pages
           path: ./dist
 
   deploy:
