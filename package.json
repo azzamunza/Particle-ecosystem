@@ -4,6 +4,7 @@
   "private": true,
   "homepage": "https://azzamunza.github.io/Particle-ecosystem",
   "scripts": {
+    "start": "vite",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
