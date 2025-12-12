@@ -96,6 +96,7 @@ export class WebGPUCompute {
         }
 
         // Attraction to nearby particles (with probability)
+        // Using multiplicative hash with golden ratio constant for pseudo-random sampling
         let hash = (index * 2654435761u) % 100u;
         if (hash < 2u) {
           for (var i = 0u; i < params.numParticles; i++) {
@@ -192,6 +193,10 @@ export class WebGPUCompute {
         gridHeight: u32,
       }
 
+      // Diffusion constants
+      const CELL_RETENTION: f32 = 0.95;
+      const NEIGHBOR_INFLUENCE: f32 = 0.05;
+
       @group(0) @binding(0) var<storage, read> gasGridIn: array<GasCell>;
       @group(0) @binding(1) var<storage, read_write> gasGridOut: array<GasCell>;
       @group(0) @binding(2) var<uniform> params: Params;
@@ -233,8 +238,8 @@ export class WebGPUCompute {
         }
 
         if (neighbors > 0.0) {
-          cell.oxygen = cell.oxygen * 0.95 + (oxygenDiff / neighbors) * 0.05;
-          cell.co2 = cell.co2 * 0.95 + (co2Diff / neighbors) * 0.05;
+          cell.oxygen = cell.oxygen * CELL_RETENTION + (oxygenDiff / neighbors) * NEIGHBOR_INFLUENCE;
+          cell.co2 = cell.co2 * CELL_RETENTION + (co2Diff / neighbors) * NEIGHBOR_INFLUENCE;
         }
 
         // Equilibration toward 50

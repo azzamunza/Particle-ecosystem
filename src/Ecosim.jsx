@@ -34,6 +34,17 @@ const EcosystemSimulator = () => {
     lastY: 0
   });
 
+  // Input validation constants
+  const VALIDATION_RANGES = {
+    initialBlocks: { min: 400, max: 1200, default: 800 },
+    attractionRange: { min: 5, max: 40, default: 12 },
+    speed: { min: 0.1, max: 1.0, default: 0.4 },
+    canvasWidth: { min: 400, max: 5000, default: 800 },
+    canvasHeight: { min: 400, max: 5000, default: 600 },
+    zoomSensitivity: { min: 0.05, max: 0.5, default: 0.1 },
+    panSensitivity: { min: 0.5, max: 2.0, default: 1.0 }
+  };
+
   const GRID_CELL_SIZE = 40;
 
   // Building block types with specific functionalities
@@ -321,15 +332,16 @@ const EcosystemSimulator = () => {
     if (!canvas) return;
 
     // Prepare particle data for GPU
-    const particleData = new Float32Array(blocks.length * 8); // 8 floats per particle (pos, vel, type, free, age, padding)
+    // Layout must match shader struct: pos(vec2), vel(vec2), type(u32), free(u32), age(u32), padding(u32)
+    const particleData = new Float32Array(blocks.length * 8);
     for (let i = 0; i < blocks.length; i++) {
       const block = blocks[i];
       particleData[i * 8 + 0] = block.x;
       particleData[i * 8 + 1] = block.y;
       particleData[i * 8 + 2] = block.vx;
       particleData[i * 8 + 3] = block.vy;
-      particleData[i * 8 + 4] = block.free ? 1 : 0;
-      particleData[i * 8 + 5] = 0; // type encoded as number
+      particleData[i * 8 + 4] = 0; // type encoded as number (placeholder for future use)
+      particleData[i * 8 + 5] = block.free ? 1 : 0; // free status
       particleData[i * 8 + 6] = block.age;
       particleData[i * 8 + 7] = 0; // padding
     }
@@ -395,12 +407,14 @@ const EcosystemSimulator = () => {
     );
 
     // Update blocks with GPU results
+    const FREE_THRESHOLD = 0.5; // Threshold for converting float to boolean
     for (let i = 0; i < blocks.length; i++) {
       blocks[i].x = resultData[i * 8 + 0];
       blocks[i].y = resultData[i * 8 + 1];
       blocks[i].vx = resultData[i * 8 + 2];
       blocks[i].vy = resultData[i * 8 + 3];
-      blocks[i].free = resultData[i * 8 + 4] > 0.5;
+      // type at index 4, free at index 5 (matches shader struct)
+      blocks[i].free = resultData[i * 8 + 5] > FREE_THRESHOLD;
       blocks[i].age = Math.floor(resultData[i * 8 + 6]);
     }
   };
@@ -1161,12 +1175,12 @@ const EcosystemSimulator = () => {
                 <label className="block text-xs text-gray-400 mb-1">Building Blocks</label>
                 <input
                   type="number"
-                  min="400"
-                  max="1200"
+                  min={VALIDATION_RANGES.initialBlocks.min}
+                  max={VALIDATION_RANGES.initialBlocks.max}
                   value={params.initialBlocks}
                   onChange={(e) => {
-                    const val = parseInt(e.target.value) || 400;
-                    setParams({ ...params, initialBlocks: Math.max(400, Math.min(1200, val)) });
+                    const val = parseInt(e.target.value) || VALIDATION_RANGES.initialBlocks.default;
+                    setParams({ ...params, initialBlocks: Math.max(VALIDATION_RANGES.initialBlocks.min, Math.min(VALIDATION_RANGES.initialBlocks.max, val)) });
                   }}
                   className="w-full px-3 py-2 bg-gray-700 text-white rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
@@ -1176,12 +1190,12 @@ const EcosystemSimulator = () => {
                 <label className="block text-xs text-gray-400 mb-1">Attraction Range (px)</label>
                 <input
                   type="number"
-                  min="5"
-                  max="40"
+                  min={VALIDATION_RANGES.attractionRange.min}
+                  max={VALIDATION_RANGES.attractionRange.max}
                   value={params.attractionRange}
                   onChange={(e) => {
-                    const val = parseInt(e.target.value) || 5;
-                    setParams({ ...params, attractionRange: Math.max(5, Math.min(40, val)) });
+                    const val = parseInt(e.target.value) || VALIDATION_RANGES.attractionRange.default;
+                    setParams({ ...params, attractionRange: Math.max(VALIDATION_RANGES.attractionRange.min, Math.min(VALIDATION_RANGES.attractionRange.max, val)) });
                   }}
                   className="w-full px-3 py-2 bg-gray-700 text-white rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
@@ -1191,13 +1205,13 @@ const EcosystemSimulator = () => {
                 <label className="block text-xs text-gray-400 mb-1">Simulation Speed</label>
                 <input
                   type="number"
-                  min="0.1"
-                  max="1.0"
+                  min={VALIDATION_RANGES.speed.min}
+                  max={VALIDATION_RANGES.speed.max}
                   step="0.1"
                   value={params.speed}
                   onChange={(e) => {
-                    const val = parseFloat(e.target.value) || 0.1;
-                    setParams({ ...params, speed: Math.max(0.1, Math.min(1.0, val)) });
+                    const val = parseFloat(e.target.value) || VALIDATION_RANGES.speed.default;
+                    setParams({ ...params, speed: Math.max(VALIDATION_RANGES.speed.min, Math.min(VALIDATION_RANGES.speed.max, val)) });
                   }}
                   className="w-full px-3 py-2 bg-gray-700 text-white rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
@@ -1207,12 +1221,12 @@ const EcosystemSimulator = () => {
                 <label className="block text-xs text-gray-400 mb-1">Canvas Width (px)</label>
                 <input
                   type="number"
-                  min="400"
-                  max="5000"
+                  min={VALIDATION_RANGES.canvasWidth.min}
+                  max={VALIDATION_RANGES.canvasWidth.max}
                   value={params.canvasWidth}
                   onChange={(e) => {
-                    const val = parseInt(e.target.value) || 800;
-                    setParams({ ...params, canvasWidth: Math.max(400, Math.min(5000, val)) });
+                    const val = parseInt(e.target.value) || VALIDATION_RANGES.canvasWidth.default;
+                    setParams({ ...params, canvasWidth: Math.max(VALIDATION_RANGES.canvasWidth.min, Math.min(VALIDATION_RANGES.canvasWidth.max, val)) });
                   }}
                   className="w-full px-3 py-2 bg-gray-700 text-white rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
@@ -1222,12 +1236,12 @@ const EcosystemSimulator = () => {
                 <label className="block text-xs text-gray-400 mb-1">Canvas Height (px)</label>
                 <input
                   type="number"
-                  min="400"
-                  max="5000"
+                  min={VALIDATION_RANGES.canvasHeight.min}
+                  max={VALIDATION_RANGES.canvasHeight.max}
                   value={params.canvasHeight}
                   onChange={(e) => {
-                    const val = parseInt(e.target.value) || 600;
-                    setParams({ ...params, canvasHeight: Math.max(400, Math.min(5000, val)) });
+                    const val = parseInt(e.target.value) || VALIDATION_RANGES.canvasHeight.default;
+                    setParams({ ...params, canvasHeight: Math.max(VALIDATION_RANGES.canvasHeight.min, Math.min(VALIDATION_RANGES.canvasHeight.max, val)) });
                   }}
                   className="w-full px-3 py-2 bg-gray-700 text-white rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
@@ -1246,13 +1260,13 @@ const EcosystemSimulator = () => {
                 <label className="block text-xs text-gray-400 mb-1">Zoom Sensitivity</label>
                 <input
                   type="number"
-                  min="0.05"
-                  max="0.5"
+                  min={VALIDATION_RANGES.zoomSensitivity.min}
+                  max={VALIDATION_RANGES.zoomSensitivity.max}
                   step="0.05"
                   value={params.zoomSensitivity}
                   onChange={(e) => {
-                    const val = parseFloat(e.target.value) || 0.05;
-                    setParams({ ...params, zoomSensitivity: Math.max(0.05, Math.min(0.5, val)) });
+                    const val = parseFloat(e.target.value) || VALIDATION_RANGES.zoomSensitivity.default;
+                    setParams({ ...params, zoomSensitivity: Math.max(VALIDATION_RANGES.zoomSensitivity.min, Math.min(VALIDATION_RANGES.zoomSensitivity.max, val)) });
                   }}
                   className="w-full px-3 py-2 bg-gray-700 text-white rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
@@ -1262,13 +1276,13 @@ const EcosystemSimulator = () => {
                 <label className="block text-xs text-gray-400 mb-1">Pan Sensitivity</label>
                 <input
                   type="number"
-                  min="0.5"
-                  max="2.0"
+                  min={VALIDATION_RANGES.panSensitivity.min}
+                  max={VALIDATION_RANGES.panSensitivity.max}
                   step="0.1"
                   value={params.panSensitivity}
                   onChange={(e) => {
-                    const val = parseFloat(e.target.value) || 0.5;
-                    setParams({ ...params, panSensitivity: Math.max(0.5, Math.min(2.0, val)) });
+                    const val = parseFloat(e.target.value) || VALIDATION_RANGES.panSensitivity.default;
+                    setParams({ ...params, panSensitivity: Math.max(VALIDATION_RANGES.panSensitivity.min, Math.min(VALIDATION_RANGES.panSensitivity.max, val)) });
                   }}
                   className="w-full px-3 py-2 bg-gray-700 text-white rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
