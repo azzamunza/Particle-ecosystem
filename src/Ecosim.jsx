@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Play, Pause, RotateCcw, ZoomIn, ZoomOut, Move } from 'lucide-react';
+import { WebGPUCompute } from './webgpu-compute.js';
 
 const EcosystemSimulator = () => {
   const canvasRef = useRef(null);
@@ -8,15 +9,20 @@ const EcosystemSimulator = () => {
   const entitiesRef = useRef([]);
   const buildingBlocksRef = useRef([]);
   const gasGridRef = useRef(null);
+  const webgpuRef = useRef(null);
+  const gpuBuffersRef = useRef(null);
   
   const [isRunning, setIsRunning] = useState(true);
   const [stats, setStats] = useState({});
+  const [useWebGPU, setUseWebGPU] = useState(false);
   const [params, setParams] = useState({
     initialBlocks: 800,
     speed: 0.4,
     attractionRange: 12,
     zoomSensitivity: 0.1,
-    panSensitivity: 1.0
+    panSensitivity: 1.0,
+    canvasWidth: 800,
+    canvasHeight: 600
   });
   
   const [camera, setCamera] = useState({
@@ -27,6 +33,17 @@ const EcosystemSimulator = () => {
     lastX: 0,
     lastY: 0
   });
+
+  // Input validation constants
+  const VALIDATION_RANGES = {
+    initialBlocks: { min: 400, max: 1200, default: 800 },
+    attractionRange: { min: 5, max: 40, default: 12 },
+    speed: { min: 0.1, max: 1.0, default: 0.4 },
+    canvasWidth: { min: 400, max: 5000, default: 800 },
+    canvasHeight: { min: 400, max: 5000, default: 600 },
+    zoomSensitivity: { min: 0.05, max: 0.5, default: 0.1 },
+    panSensitivity: { min: 0.5, max: 2.0, default: 1.0 }
+  };
 
   const GRID_CELL_SIZE = 40;
 
@@ -306,15 +323,105 @@ const EcosystemSimulator = () => {
     return Math.sqrt(dx * dx + dy * dy);
   };
 
-  const update = () => {
+  const updateBlocksWithWebGPU = async () => {
+    if (!webgpuRef.current || !gpuBuffersRef.current) return;
+
+    const gpu = webgpuRef.current;
+    const blocks = buildingBlocksRef.current;
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const entities = entitiesRef.current;
-    const blocks = buildingBlocksRef.current;
-    const gasGrid = gasGridRef.current;
+    // Prepare particle data for GPU
+    // Layout must match shader struct: pos(vec2), vel(vec2), type(u32), free(u32), age(u32), padding(u32)
+    const particleData = new Float32Array(blocks.length * 8);
+    for (let i = 0; i < blocks.length; i++) {
+      const block = blocks[i];
+      particleData[i * 8 + 0] = block.x;
+      particleData[i * 8 + 1] = block.y;
+      particleData[i * 8 + 2] = block.vx;
+      particleData[i * 8 + 3] = block.vy;
+      particleData[i * 8 + 4] = 0; // type encoded as number (placeholder for future use)
+      particleData[i * 8 + 5] = block.free ? 1 : 0; // free status
+      particleData[i * 8 + 6] = block.age;
+      particleData[i * 8 + 7] = 0; // padding
+    }
 
-    // Diffuse gases
+    // Create or update particle buffer
+    if (!gpuBuffersRef.current.particleBuffer) {
+      gpuBuffersRef.current.particleBuffer = gpu.createBuffer(
+        particleData,
+        GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
+      );
+    } else {
+      gpu.device.queue.writeBuffer(gpuBuffersRef.current.particleBuffer, 0, particleData);
+    }
+
+    // Create params buffer
+    const paramsData = new Float32Array([
+      blocks.length,
+      canvas.width,
+      canvas.height,
+      params.speed,
+      params.attractionRange,
+      1.0, // delta time
+    ]);
+
+    if (!gpuBuffersRef.current.paramsBuffer) {
+      gpuBuffersRef.current.paramsBuffer = gpu.createBuffer(
+        paramsData,
+        GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+      );
+    } else {
+      gpu.device.queue.writeBuffer(gpuBuffersRef.current.paramsBuffer, 0, paramsData);
+    }
+
+    // Create compute pipeline if not exists
+    if (!gpuBuffersRef.current.particlePipeline) {
+      const { pipeline, bindGroupLayout } = gpu.createParticleComputePipeline();
+      gpuBuffersRef.current.particlePipeline = pipeline;
+      gpuBuffersRef.current.particleBindGroupLayout = bindGroupLayout;
+    }
+
+    // Create bind group
+    const bindGroup = gpu.device.createBindGroup({
+      layout: gpuBuffersRef.current.particleBindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: gpuBuffersRef.current.particleBuffer } },
+        { binding: 1, resource: { buffer: gpuBuffersRef.current.paramsBuffer } },
+      ],
+    });
+
+    // Execute compute shader
+    const commandEncoder = gpu.device.createCommandEncoder();
+    const passEncoder = commandEncoder.beginComputePass();
+    passEncoder.setPipeline(gpuBuffersRef.current.particlePipeline);
+    passEncoder.setBindGroup(0, bindGroup);
+    passEncoder.dispatchWorkgroups(Math.ceil(blocks.length / 64));
+    passEncoder.end();
+    gpu.device.queue.submit([commandEncoder.finish()]);
+
+    // Read results back
+    const resultData = await gpu.readBuffer(
+      gpuBuffersRef.current.particleBuffer,
+      particleData.byteLength
+    );
+
+    // Update blocks with GPU results
+    const FREE_THRESHOLD = 0.5; // Threshold for converting float to boolean
+    for (let i = 0; i < blocks.length; i++) {
+      blocks[i].x = resultData[i * 8 + 0];
+      blocks[i].y = resultData[i * 8 + 1];
+      blocks[i].vx = resultData[i * 8 + 2];
+      blocks[i].vy = resultData[i * 8 + 3];
+      // type at index 4, free at index 5 (matches shader struct)
+      blocks[i].free = resultData[i * 8 + 5] > FREE_THRESHOLD;
+      blocks[i].age = Math.floor(resultData[i * 8 + 6]);
+    }
+  };
+
+  const diffuseGasesOnCPU = (gasGrid) => {
+    if (!gasGrid) return;
+    
     for (let y = 0; y < gasGrid.length; y++) {
       for (let x = 0; x < gasGrid[0].length; x++) {
         const cell = gasGrid[y][x];
@@ -341,8 +448,9 @@ const EcosystemSimulator = () => {
         cell.co2 = Math.max(0, Math.min(100, cell.co2 + (50 - cell.co2) * 0.001));
       }
     }
+  };
 
-    // Update building blocks
+  const updateBlocksOnCPU = (blocks, canvas) => {
     for (let i = 0; i < blocks.length; i++) {
       const block = blocks[i];
       if (!block.free) continue;
@@ -375,7 +483,123 @@ const EcosystemSimulator = () => {
       
       block.age++;
     }
+  };
 
+  const updateGasGridWithWebGPU = async () => {
+    if (!webgpuRef.current || !gpuBuffersRef.current) return;
+
+    const gpu = webgpuRef.current;
+    const gasGrid = gasGridRef.current;
+    if (!gasGrid) return;
+
+    const rows = gasGrid.length;
+    const cols = gasGrid[0].length;
+    const cellCount = rows * cols;
+
+    // Prepare gas grid data
+    const gasData = new Float32Array(cellCount * 2); // 2 floats per cell (oxygen, co2)
+    for (let y = 0; y < rows; y++) {
+      for (let x = 0; x < cols; x++) {
+        const index = y * cols + x;
+        gasData[index * 2 + 0] = gasGrid[y][x].oxygen;
+        gasData[index * 2 + 1] = gasGrid[y][x].co2;
+      }
+    }
+
+    // Create or update buffers
+    if (!gpuBuffersRef.current.gasGridInBuffer) {
+      gpuBuffersRef.current.gasGridInBuffer = gpu.createBuffer(
+        gasData,
+        GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
+      );
+      gpuBuffersRef.current.gasGridOutBuffer = gpu.createBuffer(
+        gasData,
+        GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
+      );
+    } else {
+      gpu.device.queue.writeBuffer(gpuBuffersRef.current.gasGridInBuffer, 0, gasData);
+    }
+
+    // Create gas grid params
+    const gasParamsData = new Uint32Array([cols, rows]);
+    if (!gpuBuffersRef.current.gasParamsBuffer) {
+      gpuBuffersRef.current.gasParamsBuffer = gpu.createBuffer(
+        gasParamsData,
+        GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+      );
+    }
+
+    // Create pipeline if not exists
+    if (!gpuBuffersRef.current.gasPipeline) {
+      const { pipeline, bindGroupLayout } = gpu.createGasGridComputePipeline();
+      gpuBuffersRef.current.gasPipeline = pipeline;
+      gpuBuffersRef.current.gasBindGroupLayout = bindGroupLayout;
+    }
+
+    // Create bind group
+    const bindGroup = gpu.device.createBindGroup({
+      layout: gpuBuffersRef.current.gasBindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: gpuBuffersRef.current.gasGridInBuffer } },
+        { binding: 1, resource: { buffer: gpuBuffersRef.current.gasGridOutBuffer } },
+        { binding: 2, resource: { buffer: gpuBuffersRef.current.gasParamsBuffer } },
+      ],
+    });
+
+    // Execute compute shader
+    const commandEncoder = gpu.device.createCommandEncoder();
+    const passEncoder = commandEncoder.beginComputePass();
+    passEncoder.setPipeline(gpuBuffersRef.current.gasPipeline);
+    passEncoder.setBindGroup(0, bindGroup);
+    passEncoder.dispatchWorkgroups(Math.ceil(cols / 8), Math.ceil(rows / 8));
+    passEncoder.end();
+    gpu.device.queue.submit([commandEncoder.finish()]);
+
+    // Read results back
+    const resultData = await gpu.readBuffer(
+      gpuBuffersRef.current.gasGridOutBuffer,
+      gasData.byteLength
+    );
+
+    // Update gas grid with GPU results
+    for (let y = 0; y < rows; y++) {
+      for (let x = 0; x < cols; x++) {
+        const index = y * cols + x;
+        gasGrid[y][x].oxygen = resultData[index * 2 + 0];
+        gasGrid[y][x].co2 = resultData[index * 2 + 1];
+      }
+    }
+
+    // Swap buffers for next iteration
+    [gpuBuffersRef.current.gasGridInBuffer, gpuBuffersRef.current.gasGridOutBuffer] = 
+      [gpuBuffersRef.current.gasGridOutBuffer, gpuBuffersRef.current.gasGridInBuffer];
+  };
+
+  const update = async () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const entities = entitiesRef.current;
+    const blocks = buildingBlocksRef.current;
+    const gasGrid = gasGridRef.current;
+
+    // Use WebGPU for gas diffusion if available
+    if (useWebGPU && webgpuRef.current) {
+      await updateGasGridWithWebGPU();
+    } else {
+      // CPU-based gas diffusion
+      diffuseGasesOnCPU(gasGrid);
+    }
+
+    // Use WebGPU for particle physics if available
+    if (useWebGPU && webgpuRef.current) {
+      await updateBlocksWithWebGPU();
+    } else {
+      // CPU-based particle updates
+      updateBlocksOnCPU(blocks, canvas);
+    }
+
+    // Continue with entity logic (keep on CPU for now as it's more complex)
     const newEntity = tryFormEntity(blocks, canvas);
     if (newEntity) entities.push(newEntity);
 
@@ -827,14 +1051,30 @@ const EcosystemSimulator = () => {
     const container = containerRef.current;
     if (!canvas || !container) return;
 
-    // Set canvas to 80% width (leave 20% for control panel)
-    const width = container.offsetWidth * 0.8;
-    const height = container.offsetHeight;
+    // Initialize WebGPU
+    const initWebGPU = async () => {
+      const gpu = new WebGPUCompute();
+      const success = await gpu.initialize();
+      if (success) {
+        webgpuRef.current = gpu;
+        gpuBuffersRef.current = {};
+        setUseWebGPU(true);
+        console.log('WebGPU enabled for simulation');
+      } else {
+        console.log('Using CPU fallback for simulation');
+      }
+    };
+
+    initWebGPU();
+
+    // Set canvas to use params dimensions or default to 80% container width
+    const displayWidth = container.offsetWidth * 0.8;
+    const displayHeight = container.offsetHeight;
     
-    canvas.width = width * 5;
-    canvas.height = height * 5;
-    canvas.style.width = width + 'px';
-    canvas.style.height = height + 'px';
+    canvas.width = params.canvasWidth;
+    canvas.height = params.canvasHeight;
+    canvas.style.width = displayWidth + 'px';
+    canvas.style.height = displayHeight + 'px';
     
     initSimulation();
     animate();
@@ -843,8 +1083,11 @@ const EcosystemSimulator = () => {
       if (animationRef.current) {
         cancelAnimationFrame(animationRef.current);
       }
+      if (webgpuRef.current) {
+        webgpuRef.current.dispose();
+      }
     };
-  }, []);
+  }, [params.canvasWidth, params.canvasHeight]);
 
   useEffect(() => {
     initSimulation();
@@ -887,6 +1130,18 @@ const EcosystemSimulator = () => {
             Ecosystem Controls
           </h1>
 
+          {/* WebGPU Status */}
+          <div className="mb-6">
+            <div className="bg-gray-900 rounded-lg p-3">
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-gray-400">Acceleration:</span>
+                <span className={`font-semibold ${useWebGPU ? 'text-green-400' : 'text-yellow-400'}`}>
+                  {useWebGPU ? '⚡ WebGPU' : '🔧 CPU'}
+                </span>
+              </div>
+            </div>
+          </div>
+
           {/* Simulation Controls */}
           <div className="mb-6">
             <h2 className="text-sm font-semibold text-gray-300 mb-3 uppercase tracking-wide">
@@ -917,48 +1172,78 @@ const EcosystemSimulator = () => {
             
             <div className="space-y-4">
               <div>
-                <div className="flex justify-between text-xs text-gray-400 mb-1">
-                  <label>Building Blocks</label>
-                  <span className="text-white font-mono">{params.initialBlocks}</span>
-                </div>
+                <label className="block text-xs text-gray-400 mb-1">Building Blocks</label>
                 <input
-                  type="range"
-                  min="400"
-                  max="1200"
+                  type="number"
+                  min={VALIDATION_RANGES.initialBlocks.min}
+                  max={VALIDATION_RANGES.initialBlocks.max}
                   value={params.initialBlocks}
-                  onChange={(e) => setParams({ ...params, initialBlocks: parseInt(e.target.value) })}
-                  className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer"
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value) || VALIDATION_RANGES.initialBlocks.default;
+                    setParams({ ...params, initialBlocks: Math.max(VALIDATION_RANGES.initialBlocks.min, Math.min(VALIDATION_RANGES.initialBlocks.max, val)) });
+                  }}
+                  className="w-full px-3 py-2 bg-gray-700 text-white rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
               </div>
 
               <div>
-                <div className="flex justify-between text-xs text-gray-400 mb-1">
-                  <label>Attraction Range</label>
-                  <span className="text-white font-mono">{params.attractionRange}px</span>
-                </div>
+                <label className="block text-xs text-gray-400 mb-1">Attraction Range (px)</label>
                 <input
-                  type="range"
-                  min="5"
-                  max="40"
+                  type="number"
+                  min={VALIDATION_RANGES.attractionRange.min}
+                  max={VALIDATION_RANGES.attractionRange.max}
                   value={params.attractionRange}
-                  onChange={(e) => setParams({ ...params, attractionRange: parseInt(e.target.value) })}
-                  className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer"
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value) || VALIDATION_RANGES.attractionRange.default;
+                    setParams({ ...params, attractionRange: Math.max(VALIDATION_RANGES.attractionRange.min, Math.min(VALIDATION_RANGES.attractionRange.max, val)) });
+                  }}
+                  className="w-full px-3 py-2 bg-gray-700 text-white rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
               </div>
 
               <div>
-                <div className="flex justify-between text-xs text-gray-400 mb-1">
-                  <label>Simulation Speed</label>
-                  <span className="text-white font-mono">{params.speed.toFixed(1)}x</span>
-                </div>
+                <label className="block text-xs text-gray-400 mb-1">Simulation Speed</label>
                 <input
-                  type="range"
-                  min="0.1"
-                  max="1.0"
+                  type="number"
+                  min={VALIDATION_RANGES.speed.min}
+                  max={VALIDATION_RANGES.speed.max}
                   step="0.1"
                   value={params.speed}
-                  onChange={(e) => setParams({ ...params, speed: parseFloat(e.target.value) })}
-                  className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer"
+                  onChange={(e) => {
+                    const val = parseFloat(e.target.value) || VALIDATION_RANGES.speed.default;
+                    setParams({ ...params, speed: Math.max(VALIDATION_RANGES.speed.min, Math.min(VALIDATION_RANGES.speed.max, val)) });
+                  }}
+                  className="w-full px-3 py-2 bg-gray-700 text-white rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs text-gray-400 mb-1">Canvas Width (px)</label>
+                <input
+                  type="number"
+                  min={VALIDATION_RANGES.canvasWidth.min}
+                  max={VALIDATION_RANGES.canvasWidth.max}
+                  value={params.canvasWidth}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value) || VALIDATION_RANGES.canvasWidth.default;
+                    setParams({ ...params, canvasWidth: Math.max(VALIDATION_RANGES.canvasWidth.min, Math.min(VALIDATION_RANGES.canvasWidth.max, val)) });
+                  }}
+                  className="w-full px-3 py-2 bg-gray-700 text-white rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs text-gray-400 mb-1">Canvas Height (px)</label>
+                <input
+                  type="number"
+                  min={VALIDATION_RANGES.canvasHeight.min}
+                  max={VALIDATION_RANGES.canvasHeight.max}
+                  value={params.canvasHeight}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value) || VALIDATION_RANGES.canvasHeight.default;
+                    setParams({ ...params, canvasHeight: Math.max(VALIDATION_RANGES.canvasHeight.min, Math.min(VALIDATION_RANGES.canvasHeight.max, val)) });
+                  }}
+                  className="w-full px-3 py-2 bg-gray-700 text-white rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
               </div>
             </div>
@@ -972,34 +1257,34 @@ const EcosystemSimulator = () => {
             
             <div className="space-y-4 mb-3">
               <div>
-                <div className="flex justify-between text-xs text-gray-400 mb-1">
-                  <label>Zoom Sensitivity</label>
-                  <span className="text-white font-mono">{params.zoomSensitivity.toFixed(2)}</span>
-                </div>
+                <label className="block text-xs text-gray-400 mb-1">Zoom Sensitivity</label>
                 <input
-                  type="range"
-                  min="0.05"
-                  max="0.5"
+                  type="number"
+                  min={VALIDATION_RANGES.zoomSensitivity.min}
+                  max={VALIDATION_RANGES.zoomSensitivity.max}
                   step="0.05"
                   value={params.zoomSensitivity}
-                  onChange={(e) => setParams({ ...params, zoomSensitivity: parseFloat(e.target.value) })}
-                  className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer"
+                  onChange={(e) => {
+                    const val = parseFloat(e.target.value) || VALIDATION_RANGES.zoomSensitivity.default;
+                    setParams({ ...params, zoomSensitivity: Math.max(VALIDATION_RANGES.zoomSensitivity.min, Math.min(VALIDATION_RANGES.zoomSensitivity.max, val)) });
+                  }}
+                  className="w-full px-3 py-2 bg-gray-700 text-white rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
               </div>
 
               <div>
-                <div className="flex justify-between text-xs text-gray-400 mb-1">
-                  <label>Pan Sensitivity</label>
-                  <span className="text-white font-mono">{params.panSensitivity.toFixed(1)}</span>
-                </div>
+                <label className="block text-xs text-gray-400 mb-1">Pan Sensitivity</label>
                 <input
-                  type="range"
-                  min="0.5"
-                  max="2.0"
+                  type="number"
+                  min={VALIDATION_RANGES.panSensitivity.min}
+                  max={VALIDATION_RANGES.panSensitivity.max}
                   step="0.1"
                   value={params.panSensitivity}
-                  onChange={(e) => setParams({ ...params, panSensitivity: parseFloat(e.target.value) })}
-                  className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer"
+                  onChange={(e) => {
+                    const val = parseFloat(e.target.value) || VALIDATION_RANGES.panSensitivity.default;
+                    setParams({ ...params, panSensitivity: Math.max(VALIDATION_RANGES.panSensitivity.min, Math.min(VALIDATION_RANGES.panSensitivity.max, val)) });
+                  }}
+                  className="w-full px-3 py-2 bg-gray-700 text-white rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
               </div>
             </div>
